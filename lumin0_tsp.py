@@ -1,18 +1,19 @@
 """
 lumin0_tsp.py
-Tension-based TSP benchmark for Lumin0.
+TSP baseline vs tension-modified benchmark for Lumin0 FLOP comparison.
 """
 
 import numpy as np
-from lumin0_core import FLOPS
+from flop_counter import GLOBAL_FLOPS as FLOPS
 from lumin0_utils import compute_distance_matrix, path_length, random_points
 
 
-# -------------------------------
-# Baseline: standard randomized 2-opt
-# -------------------------------
-def baseline_tsp_step(order, dist):
+# ---------------------------------------------------------
+# Baseline: simple randomized 2-opt
+# ---------------------------------------------------------
+def baseline_tsp_step(order: np.ndarray, dist: np.ndarray):
     n = len(order)
+
     i = np.random.randint(0, n)
     j = np.random.randint(0, n)
 
@@ -25,23 +26,24 @@ def baseline_tsp_step(order, dist):
     old_cost = path_length(order, dist)
     new_cost = path_length(new_order, dist)
 
-    FLOPS.add(10)
+    FLOPS.add(10)  # heuristic 2-opt overhead
 
     return new_order if new_cost < old_cost else order
 
 
-# -------------------------------
+# ---------------------------------------------------------
 # Tension-modified 2-opt
-# -------------------------------
-def tension_tsp_step(order, dist, tension=0.1):
+# ---------------------------------------------------------
+def tension_tsp_step(order: np.ndarray, dist: np.ndarray, tension: float = 0.1):
     n = len(order)
 
-    # synthetic center structure
+    # synthetic "center" structure for mild global pull
     center = np.arange(n)
     deviation = np.abs(order - center)
 
     i = np.random.randint(0, n)
-    j = min(n - 1, i + int(1 + tension * np.mean(deviation)))
+    shift = int(1 + tension * np.mean(deviation))
+    j = min(n - 1, i + shift)
 
     new_order = order.copy()
     new_order[i:j] = new_order[i:j][::-1]
@@ -49,35 +51,54 @@ def tension_tsp_step(order, dist, tension=0.1):
     old_cost = path_length(order, dist)
     new_cost = path_length(new_order, dist)
 
-    FLOPS.add(20)
+    FLOPS.add(20)  # tension overhead
 
     return new_order if new_cost < old_cost else order
 
 
-# -------------------------------
+# ---------------------------------------------------------
 # Benchmark Runner
-# -------------------------------
-def run_tsp(cities=32, steps=500, tension=0.1, seed=None):
+# ---------------------------------------------------------
+def run_tsp(cities: int = 32, steps: int = 500, tension: float = 0.1, seed=None):
+    """
+    Returns a dict:
+        {
+            cities,
+            steps,
+            tension_strength,
+            baseline_cost,
+            baseline_flops,
+            tension_cost,
+            tension_flops,
+            flop_savings
+        }
+    """
     if seed is not None:
         np.random.seed(seed)
 
+    # generate problem instance
     pts = random_points(cities, dim=2)
     dist = compute_distance_matrix(pts)
 
-    # Baseline
+    # ---------------- Baseline ----------------
+    FLOPS.reset()
     order0 = np.arange(cities)
     baseline = order0.copy()
+
     for _ in range(steps):
         baseline = baseline_tsp_step(baseline, dist)
+
     baseline_cost = path_length(baseline, dist)
     baseline_flops = FLOPS.snapshot()
 
-    # Tension
+    # ---------------- Tension ----------------
     FLOPS.reset()
-    order = order0.copy()
+    tension_order = order0.copy()
+
     for _ in range(steps):
-        order = tension_tsp_step(order, dist, tension=tension)
-    tension_cost = path_length(order, dist)
+        tension_order = tension_tsp_step(tension_order, dist, tension=tension)
+
+    tension_cost = path_length(tension_order, dist)
     tension_flops = FLOPS.snapshot()
 
     return {
@@ -89,4 +110,4 @@ def run_tsp(cities=32, steps=500, tension=0.1, seed=None):
         "tension_cost": float(tension_cost),
         "tension_flops": int(tension_flops),
         "flop_savings": int(baseline_flops - tension_flops)
-        }
+    }
