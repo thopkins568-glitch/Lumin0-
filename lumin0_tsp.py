@@ -4,13 +4,14 @@ Tension-based TSP benchmark for Lumin0.
 """
 
 import numpy as np
-from lumin0_utils import compute_distance_matrix, path_length, random_points
 from lumin0_core import FLOPS
+from lumin0_utils import compute_distance_matrix, path_length, random_points
 
-def baseline_tsp_step(order: np.ndarray, dist: np.ndarray):
-    """
-    Simple 2-opt baseline step.
-    """
+
+# -------------------------------
+# Baseline: standard randomized 2-opt
+# -------------------------------
+def baseline_tsp_step(order, dist):
     n = len(order)
     i = np.random.randint(0, n)
     j = np.random.randint(0, n)
@@ -26,19 +27,16 @@ def baseline_tsp_step(order: np.ndarray, dist: np.ndarray):
 
     FLOPS.add(10)
 
-    if new_cost < old_cost:
-        return new_order
-    return order
+    return new_order if new_cost < old_cost else order
 
-def tension_tsp_step(order: np.ndarray, dist: np.ndarray, tension=0.1):
-    """
-    Idea:
-    - Compute "center of mass" ordering (mean of adjacency structure)
-    - Apply 2-opt move influenced by difference from baseline
-    """
+
+# -------------------------------
+# Tension-modified 2-opt
+# -------------------------------
+def tension_tsp_step(order, dist, tension=0.1):
     n = len(order)
 
-    # synthetic "center" ordering = sorted order for mild bias
+    # synthetic center structure
     center = np.arange(n)
     deviation = np.abs(order - center)
 
@@ -55,6 +53,10 @@ def tension_tsp_step(order: np.ndarray, dist: np.ndarray, tension=0.1):
 
     return new_order if new_cost < old_cost else order
 
+
+# -------------------------------
+# Benchmark Runner
+# -------------------------------
 def run_tsp(cities=32, steps=500, tension=0.1, seed=None):
     if seed is not None:
         np.random.seed(seed)
@@ -72,10 +74,10 @@ def run_tsp(cities=32, steps=500, tension=0.1, seed=None):
 
     # Tension
     FLOPS.reset()
-    tension_order = order0.copy()
+    order = order0.copy()
     for _ in range(steps):
-        tension_order = tension_tsp_step(tension_order, dist, tension)
-    tension_cost = path_length(tension_order, dist)
+        order = tension_tsp_step(order, dist, tension=tension)
+    tension_cost = path_length(order, dist)
     tension_flops = FLOPS.snapshot()
 
     return {
@@ -86,5 +88,5 @@ def run_tsp(cities=32, steps=500, tension=0.1, seed=None):
         "baseline_flops": int(baseline_flops),
         "tension_cost": float(tension_cost),
         "tension_flops": int(tension_flops),
-        "flop_savings": int(baseline_flops - tension_flops),
-    }
+        "flop_savings": int(baseline_flops - tension_flops)
+        }
