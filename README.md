@@ -1,2 +1,2 @@
 # Lumin0-
-Lumen0 Benchmark – evaluating computational efficiency under physical tension constraints.
+Open-source LLM inference benchmark suite – throughput, energy (J/token), perplexity, and evaluation performance.
