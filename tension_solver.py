@@ -1,11 +1,11 @@
 """
 tension_solver.py
-Core tension-based optimizer for Lumin0 benchmark.
+Core tension-based optimizer for Lumen0 benchmark.
 """
 
 import numpy as np
 from typing import Callable, Tuple
-from lumin0_core import FLOPS
+from flop_counter import GLOBAL_FLOPS as FLOPS
 
 
 def tension_step(
@@ -15,9 +15,9 @@ def tension_step(
     step_size: float = 0.1
 ) -> np.ndarray:
     """
-    One iteration of the tension optimizer.
+    One iteration of the tension optimizer:
     - baseline random step
-    - plus coupling toward population mean
+    - coupling toward population mean
     """
 
     n, d = pop.shape
@@ -25,16 +25,16 @@ def tension_step(
 
     # compute center
     center = np.mean(pop, axis=0)
-    FLOPS.add(n * d * 2)   # heuristic mean FLOPs
+    FLOPS.add(n * d * 2)   # heuristic FLOPs for mean calculation
 
     for i in range(n):
         # baseline random step
-        delta = np.random.normal(0.0, step_size, size=d)
         FLOPS.add(d * 3)
+        delta = np.random.normal(0.0, step_size, size=d)
 
         # tension coupling
-        coupling = tension * (center - pop[i])
         FLOPS.add(d * 2)
+        coupling = tension * (center - pop[i])
 
         # candidate point
         candidate = pop[i] + delta + coupling
@@ -57,12 +57,16 @@ def tension_run(
     steps: int = 100,
     tension: float = 0.1,
     step_size: float = 0.1
-) -> Tuple[np.ndarray, list]:
+) -> Tuple[np.ndarray, list, float, int]:
     """
     Runs the tension solver and returns:
-    - final population
-    - history of mean-objective scores
+      - final population
+      - history of mean-objective scores
+      - best final value (min over pop)
+      - total FLOPs used
     """
+
+    FLOPS.reset()
 
     pop = np.random.uniform(-5.0, 5.0, size=(pop_size, dim))
     path = []
@@ -71,4 +75,9 @@ def tension_run(
         pop = tension_step(pop, func, tension=tension, step_size=step_size)
         path.append(float(func(pop.mean(axis=0))))
 
-    return pop, path
+    # compute best value properly
+    best_val = min(float(func(ind)) for ind in pop)
+
+    total_flops = FLOPS.snapshot()
+
+    return pop, path, best_val, total_flops
