@@ -4,7 +4,7 @@ Common utilities for Lumin0 benchmark modules.
 """
 
 import numpy as np
-from lumin0_core import FLOPS
+from flop_counter import GLOBAL_FLOPS as FLOPS
 
 
 # ---------------------------------------------------------
