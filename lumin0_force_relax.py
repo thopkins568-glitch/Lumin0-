@@ -1,7 +1,7 @@
 """
 lumin0_force_relax.py
-Minimal particle–spring relaxation benchmark with optional tension field.
-Uses shared GLOBAL_FLOPS counter from flop_counter.py.
+Consistent particle–spring relaxation benchmark with explicit FLOP accounting.
+Compatible with updated Lumen0 architecture.
 """
 
 import numpy as np
@@ -9,90 +9,144 @@ from flop_counter import GLOBAL_FLOPS as FLOPS
 
 
 # -------------------------------------------------
+# UTILITIES
+# -------------------------------------------------
+
+def pairwise_energy(pos):
+    """
+    Computes Σ (pos[i+1] - pos[i])² with FLOP accounting.
+    """
+    diffs = pos[1:] - pos[:-1]     # n-1 vector subtractions
+    FLOPS.add(diffs.size)          # 1 FLOP per subtraction
+
+    sq = diffs * diffs             # elementwise square
+    FLOPS.add(diffs.size)          # 1 FLOP per multiply
+
+    energy = float(np.sum(sq))
+    FLOPS.add(sq.size)             # sum is n-1 adds
+
+    return energy
+
+
+# -------------------------------------------------
 # FORCE COMPUTATION
 # -------------------------------------------------
+
 def compute_forces(pos, k=1.0):
     """
-    Simple 1D spring chain: force between each pair (i, i+1).
+    Explicit spring forces with FLOP accounting.
     pos: (n, d)
     """
-    n = pos.shape[0]
+    n, d = pos.shape
     forces = np.zeros_like(pos)
 
+    # For each spring, add +k*diff to i and -k*diff to i+1.
     for i in range(n - 1):
-        diff = pos[i + 1] - pos[i]
-        forces[i] += k * diff
-        forces[i + 1] -= k * diff
-        FLOPS.add(20)   # force computation cost
+        diff = pos[i + 1] - pos[i]      # d subtractions
+        FLOPS.add(d)                    # per-dimension subtracts
+
+        scaled = k * diff               # d multiplies
+        FLOPS.add(d)
+
+        forces[i] += scaled             # d adds
+        forces[i + 1] -= scaled         # d subtracts
+        FLOPS.add(2 * d)
 
     return forces
 
 
 # -------------------------------------------------
-# BASELINE UPDATE
+# SOLVER CLASSES
 # -------------------------------------------------
-def baseline_force_step(pos, lr=0.1, k=1.0):
-    return pos + lr * compute_forces(pos, k=k)
+
+class ForceRelaxBaseline:
+    def __init__(self, lr=0.1, k=1.0):
+        self.lr = lr
+        self.k = k
+
+    def step(self, pos):
+        forces = compute_forces(pos, k=self.k)
+        # pos + lr * forces
+        FLOPS.add(pos.size)  # multiply
+        FLOPS.add(pos.size)  # add
+        return pos + self.lr * forces
+
+
+class ForceRelaxTension:
+    def __init__(self, lr=0.1, tension=0.1, k=1.0):
+        self.lr = lr
+        self.k = k
+        self.tension = tension
+
+    def step(self, pos):
+        forces = compute_forces(pos, k=self.k)
+
+        # coupling = tension * (center - pos)
+        center = np.mean(pos, axis=0)
+        # mean: n adds and 1 divide, per dimension
+        n, d = pos.shape
+        FLOPS.add((n * d))     # adds
+        FLOPS.add(d)           # divides
+
+        diff = center - pos
+        FLOPS.add(pos.size)    # subtracts
+
+        coupling = self.tension * diff
+        FLOPS.add(pos.size)    # multiplies
+
+        # total update pos + lr*forces + coupling
+        FLOPS.add(pos.size)    # lr*forces multiply
+        FLOPS.add(pos.size)    # pos + lr*forces
+        FLOPS.add(pos.size)    # add coupling
+
+        return pos + self.lr * forces + coupling
 
 
 # -------------------------------------------------
-# TENSION UPDATE
+# MAIN SIMULATION API
 # -------------------------------------------------
-def tension_force_step(pos, tension=0.1, lr=0.1, k=1.0):
-    center = pos.mean(axis=0)
-    coupling = tension * (center - pos)
 
-    FLOPS.add(pos.size * 2)  # tension overhead
-
-    return pos + lr * compute_forces(pos, k=k) + coupling
-
-
-# -------------------------------------------------
-# MAIN SIMULATION
-# -------------------------------------------------
 def run_force_relax(n=16, steps=200, tension=0.1, seed=None, k=1.0):
     """
-    Returns dict with:
-      - baseline_energy
-      - baseline_flops
-      - tension_energy
-      - tension_flops
-      - flop_savings
+    Returns dict:
+        - baseline_energy
+        - baseline_flops
+        - tension_energy
+        - tension_flops
+        - flop_savings
     """
 
     if seed is not None:
         np.random.seed(seed)
 
-    # initial particle positions (2D)
     pos0 = np.random.randn(n, 2)
 
     # --------------------------
-    # BASELINE RUN
+    # BASELINE
     # --------------------------
+    baseline = ForceRelaxBaseline(lr=0.1, k=k)
     pos = pos0.copy()
     FLOPS.reset()
 
     for _ in range(steps):
-        pos = baseline_force_step(pos, lr=0.1, k=k)
+        pos = baseline.step(pos)
 
-    baseline_energy = float(np.sum((pos[1:] - pos[:-1]) ** 2))
+    baseline_energy = pairwise_energy(pos)
     baseline_flops = FLOPS.snapshot()
 
     # --------------------------
-    # TENSION RUN
+    # TENSION
     # --------------------------
+    tension_solver = ForceRelaxTension(lr=0.1, tension=tension, k=k)
     pos = pos0.copy()
     FLOPS.reset()
 
     for _ in range(steps):
-        pos = tension_force_step(pos, tension=tension, lr=0.1, k=k)
+        pos = tension_solver.step(pos)
 
-    tension_energy = float(np.sum((pos[1:] - pos[:-1]) ** 2))
+    tension_energy = pairwise_energy(pos)
     tension_flops = FLOPS.snapshot()
 
-    # --------------------------
-    # RESULT
-    # --------------------------
     return {
         "particles": n,
         "steps": steps,
