@@ -3,6 +3,7 @@ import numpy as np
 from typing import Callable, Tuple
 from flop_counter import GLOBAL_FLOPS as FLOPS
 
+
 def baseline_step(pop: np.ndarray, func: Callable[[np.ndarray], float],
                   step_size: float = 0.1) -> np.ndarray:
     """One iteration of baseline random local search with greedy accept."""
@@ -35,11 +36,10 @@ def baseline_run(func: Callable[[np.ndarray], float],
     Run baseline solver; returns:
       - final population
       - path of mean objective values
+      - best final value (min over pop)
       - total FLOPs used
-      - best final value
     """
 
-    # reset FLOP counter (important)
     FLOPS.reset()
 
     pop = np.random.uniform(-5.0, 5.0, size=(pop_size, dim))
@@ -49,7 +49,9 @@ def baseline_run(func: Callable[[np.ndarray], float],
         pop = baseline_step(pop, func, step_size=step_size)
         path.append(float(func(pop.mean(axis=0))))
 
-    best_val = float(func(pop.mean(axis=0)))
+    # Correct best value
+    best_val = min(float(func(ind)) for ind in pop)
+
     total_flops = FLOPS.snapshot()
 
     return pop, path, best_val, total_flops
