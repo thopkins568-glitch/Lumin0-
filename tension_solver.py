@@ -1,83 +1,26 @@
 """
 tension_solver.py
-Core tension-based optimizer for Lumen0 benchmark.
+Runs tension-enabled versions of all Lumin0 solvers.
 """
 
-import numpy as np
-from typing import Callable, Tuple
-from flop_counter import GLOBAL_FLOPS as FLOPS
+from lumin0_core import Lumin0Core
+from lumin0_force_relax import run_force_relax
+from lumin0_matrix_relax import run_matrix_relax
+from lumin0_tsp import run_tsp
+from lumin0_real import Lumin0Real
 
 
-def tension_step(
-    pop: np.ndarray,
-    func: Callable[[np.ndarray], float],
-    tension: float = 0.1,
-    step_size: float = 0.1
-) -> np.ndarray:
+def run_tension_all(tension=0.1):
     """
-    One iteration of the tension optimizer:
-    - baseline random step
-    - coupling toward population mean
+    Returns dict with tension-enabled results across all solvers.
     """
 
-    n, d = pop.shape
-    new_pop = pop.copy()
+    core = Lumin0Core()
 
-    # compute center
-    center = np.mean(pop, axis=0)
-    FLOPS.add(n * d * 2)   # heuristic FLOPs for mean calculation
-
-    for i in range(n):
-        # baseline random step
-        FLOPS.add(d * 3)
-        delta = np.random.normal(0.0, step_size, size=d)
-
-        # tension coupling
-        FLOPS.add(d * 2)
-        coupling = tension * (center - pop[i])
-
-        # candidate point
-        candidate = pop[i] + delta + coupling
-
-        # evaluate old + new
-        cur_val = func(pop[i])
-        cand_val = func(candidate)
-        FLOPS.add(20)
-
-        if cand_val < cur_val:
-            new_pop[i] = candidate
-
-    return new_pop
-
-
-def tension_run(
-    func: Callable[[np.ndarray], float],
-    dim: int = 8,
-    pop_size: int = 32,
-    steps: int = 100,
-    tension: float = 0.1,
-    step_size: float = 0.1
-) -> Tuple[np.ndarray, list, float, int]:
-    """
-    Runs the tension solver and returns:
-      - final population
-      - history of mean-objective scores
-      - best final value (min over pop)
-      - total FLOPs used
-    """
-
-    FLOPS.reset()
-
-    pop = np.random.uniform(-5.0, 5.0, size=(pop_size, dim))
-    path = []
-
-    for _ in range(steps):
-        pop = tension_step(pop, func, tension=tension, step_size=step_size)
-        path.append(float(func(pop.mean(axis=0))))
-
-    # compute best value properly
-    best_val = min(float(func(ind)) for ind in pop)
-
-    total_flops = FLOPS.snapshot()
-
-    return pop, path, best_val, total_flops
+    return {
+        "force_relax": run_force_relax(n=16, steps=200, tension=tension),
+        "matrix_relax": run_matrix_relax(n=64, steps=200, tension=tension),
+        "tsp": run_tsp(cities=32, steps=500, tension=tension),
+        "real": Lumin0Real(dim=64, tension=tension).run(steps=200, use_tension=True),
+        "core_meta": core.describe(),
+    }
