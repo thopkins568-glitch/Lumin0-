@@ -1,17 +1,19 @@
 # flop_counter.py
+from dataclasses import dataclass
 
+@dataclass
 class FlopCounter:
-    def __init__(self):
-        self.count = 0
+    """Simple global FLOP counter (counts arithmetic operations only)."""
+    count: int = 0
 
-    def add(self, n):
+    def add(self, n: int):
         self.count += int(n)
 
     def reset(self):
         self.count = 0
 
-    def snapshot(self):
+    def snapshot(self) -> int:
         return int(self.count)
 
-# Single global instance used across all modules
+# single global instance used by all modules
 GLOBAL_FLOPS = FlopCounter()
