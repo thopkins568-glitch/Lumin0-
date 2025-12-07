@@ -1,179 +1,86 @@
+# lumin0_matrix_relax.py
 """
-lumin0_matrix_relax.py
-Consistent linear system relaxation benchmark with explicit FLOP accounting.
-Matches updated Lumen0 architecture and FLOP model.
-
-We solve A x ≈ b via gradient relaxation:
-    grad = Aᵀ(Ax - b)
-    x ← x - lr * grad        (baseline)
-    x ← x - lr * grad + coupling   (tension)
+Matrix relaxation for solving A x ≈ b via simple gradient relaxation,
+with optional tension coupling toward origin. Convergence on residual norm.
 """
-
 import numpy as np
 from flop_counter import GLOBAL_FLOPS as FLOPS
 
-
-# -------------------------------------------------
-# FLOP-Accounted Linear Algebra
-# -------------------------------------------------
-
-def matvec(A, x):
-    """
-    Computes A @ x with FLOP accounting:
-    For an (n×n) matrix:
-        n * n multiplies + n * (n-1) adds
-    """
+def baseline_matrix_step(A: np.ndarray, x: np.ndarray, b: np.ndarray, lr: float = 0.01) -> np.ndarray:
+    # grad = A^T (A x - b)
+    # FLOPs for Ax: n^2 mult-add ~ 2*n^2; for A^T @ r: another 2*n^2 -> approx 4*n^2
     n = A.shape[0]
-    FLOPS.add(n * n)          # multiplies
-    FLOPS.add(n * (n - 1))    # adds
-    return A @ x
+    FLOPS.add(int(4 * (n**2)))
+    grad = A.T @ (A @ x - b)
+    return x - lr * grad
 
+def tension_matrix_step(A: np.ndarray, x: np.ndarray, b: np.ndarray, tension: float = 0.1, lr: float = 0.01) -> np.ndarray:
+    n = A.shape[0]
+    FLOPS.add(int(4 * (n**2)))
+    grad = A.T @ (A @ x - b)
+    coupling = -tension * x
+    FLOPS.add(x.size)  # coupling ops
+    return x - lr * grad + coupling
 
-def vec_add(a, b):
-    """
-    Vector addition with FLOP accounting.
-    """
-    FLOPS.add(a.size)
-    return a + b
+def residual_norm(A: np.ndarray, x: np.ndarray, b: np.ndarray) -> float:
+    r = A @ x - b
+    # FLOPs for Ax: ~2*n^2 (we'll count modestly)
+    FLOPS.add(int(2 * (A.shape[0]**2)))
+    return float(np.linalg.norm(r))
 
-
-def vec_sub(a, b):
-    """
-    Vector subtraction with FLOP accounting.
-    """
-    FLOPS.add(a.size)
-    return a - b
-
-
-def scalar_vec_mul(c, v):
-    """
-    c * v with FLOP accounting.
-    """
-    FLOPS.add(v.size)
-    return c * v
-
-
-def l2_norm(v):
-    """
-    ||v||₂ with FLOP accounting.
-    """
-    # Square: size multiplies
-    FLOPS.add(v.size)
-    sq = v * v
-
-    # Sum: size adds
-    FLOPS.add(v.size - 1)
-    s = float(np.sum(sq))
-
-    # sqrt: ~1 FLOP (treat as constant)
-    FLOPS.add(1)
-
-    return np.sqrt(s)
-
-
-# -------------------------------------------------
-# GRADIENT COMPUTATION
-# -------------------------------------------------
-
-def compute_gradient(A, x, b):
-    """
-    grad = Aᵀ (A x - b)
-    with full FLOP accounting.
-    """
-    Ax = matvec(A, x)
-    r = vec_sub(Ax, b)        # residual
-    grad = matvec(A.T, r)
-    return grad
-
-
-# -------------------------------------------------
-# SOLVER CLASSES
-# -------------------------------------------------
-
-class MatrixRelaxBaseline:
-    def __init__(self, lr=0.01):
-        self.lr = lr
-
-    def step(self, A, x, b):
-        grad = compute_gradient(A, x, b)
-        update = scalar_vec_mul(self.lr, grad)
-        return vec_sub(x, update)
-
-
-class MatrixRelaxTension:
-    def __init__(self, lr=0.01, tension=0.1):
-        self.lr = lr
-        self.tension = tension
-
-    def step(self, A, x, b):
-        grad = compute_gradient(A, x, b)
-
-        # -lr * grad
-        grad_term = scalar_vec_mul(self.lr, grad)
-        x_new = vec_sub(x, grad_term)
-
-        # coupling = -tension * x
-        coupling = scalar_vec_mul(-self.tension, x)
-
-        # x_new + coupling
-        return vec_add(x_new, coupling)
-
-
-# -------------------------------------------------
-# MAIN DRIVER
-# -------------------------------------------------
-
-def run_matrix_relax(n=64, steps=200, tension=0.05, seed=None):
-    """
-    Runs baseline vs tension solver.
-    Returns:
-        - baseline_err
-        - baseline_flops
-        - tension_err
-        - tension_flops
-        - flop_savings
-    """
-
+def run_matrix_relax(n: int = 64, steps: int = 200, tension: float = 0.05, tol: float = 0.0, patience: int = 5, seed: int = None):
     if seed is not None:
         np.random.seed(seed)
-
-    # Random system A x ≈ b
     A = np.random.randn(n, n)
     b = np.random.randn(n)
     x0 = np.zeros(n)
 
-    # --------------------------
-    # BASELINE RUN
-    # --------------------------
-    solver_base = MatrixRelaxBaseline(lr=0.01)
+    # baseline
     x = x0.copy()
     FLOPS.reset()
-
+    best_res = float("inf")
+    stagnant = 0
+    iters = 0
     for _ in range(steps):
-        x = solver_base.step(A, x, b)
-
-    baseline_err = l2_norm(matvec(A, x) - b)
+        x = baseline_matrix_step(A, x, b)
+        iters += 1
+        res = residual_norm(A, x, b)
+        if res < best_res - tol:
+            best_res = res
+            stagnant = 0
+        else:
+            stagnant += 1
+        if tol is not None and stagnant >= max(1, patience):
+            break
     baseline_flops = FLOPS.snapshot()
+    baseline_err = float(residual_norm(A, x, b))
+    baseline_conv = (stagnant >= max(1, patience))
 
-    # --------------------------
-    # TENSION RUN
-    # --------------------------
-    solver_tens = MatrixRelaxTension(lr=0.01, tension=tension)
+    # tension
     x = x0.copy()
     FLOPS.reset()
-
+    best_res = float("inf")
+    stagnant = 0
+    t_iters = 0
     for _ in range(steps):
-        x = solver_tens.step(A, x, b)
-
-    tension_err = l2_norm(matvec(A, x) - b)
+        x = tension_matrix_step(A, x, b, tension=tension)
+        t_iters += 1
+        res = residual_norm(A, x, b)
+        if res < best_res - tol:
+            best_res = res
+            stagnant = 0
+        else:
+            stagnant += 1
+        if tol is not None and stagnant >= max(1, patience):
+            break
     tension_flops = FLOPS.snapshot()
+    tension_err = float(residual_norm(A, x, b))
+    tension_conv = (stagnant >= max(1, patience))
 
     return {
-        "dim": n,
-        "steps": steps,
-        "baseline_err": baseline_err,
-        "baseline_flops": baseline_flops,
-        "tension_err": tension_err,
-        "tension_flops": tension_flops,
-        "flop_savings": baseline_flops - tension_flops,
+        "problem": "matrix_relax",
+        "params": {"dim": n, "steps": steps, "tension": tension, "tol": tol, "patience": patience, "seed": seed},
+        "baseline": {"residual": baseline_err, "flops": int(baseline_flops), "iters": iters, "converged": baseline_conv},
+        "tension": {"residual": tension_err, "flops": int(tension_flops), "iters": t_iters, "converged": tension_conv},
+        "flop_savings": int(baseline_flops - tension_flops),
     }
