@@ -1,158 +1,87 @@
+# lumin0_force_relax.py
 """
-lumin0_force_relax.py
-Consistent particle–spring relaxation benchmark with explicit FLOP accounting.
-Compatible with updated Lumen0 architecture.
+Particle-spring chain relaxation with optional tension coupling.
+Convergence based on change in total chain energy.
 """
-
 import numpy as np
 from flop_counter import GLOBAL_FLOPS as FLOPS
 
-
-# -------------------------------------------------
-# UTILITIES
-# -------------------------------------------------
-
-def pairwise_energy(pos):
-    """
-    Computes Σ (pos[i+1] - pos[i])² with FLOP accounting.
-    """
-    diffs = pos[1:] - pos[:-1]     # n-1 vector subtractions
-    FLOPS.add(diffs.size)          # 1 FLOP per subtraction
-
-    sq = diffs * diffs             # elementwise square
-    FLOPS.add(diffs.size)          # 1 FLOP per multiply
-
-    energy = float(np.sum(sq))
-    FLOPS.add(sq.size)             # sum is n-1 adds
-
-    return energy
-
-
-# -------------------------------------------------
-# FORCE COMPUTATION
-# -------------------------------------------------
-
-def compute_forces(pos, k=1.0):
-    """
-    Explicit spring forces with FLOP accounting.
-    pos: (n, d)
-    """
-    n, d = pos.shape
+def compute_forces(pos: np.ndarray, k: float = 1.0) -> np.ndarray:
+    n = pos.shape[0]
     forces = np.zeros_like(pos)
-
-    # For each spring, add +k*diff to i and -k*diff to i+1.
     for i in range(n - 1):
-        diff = pos[i + 1] - pos[i]      # d subtractions
-        FLOPS.add(d)                    # per-dimension subtracts
-
-        scaled = k * diff               # d multiplies
-        FLOPS.add(d)
-
-        forces[i] += scaled             # d adds
-        forces[i + 1] -= scaled         # d subtracts
-        FLOPS.add(2 * d)
-
+        diff = pos[i+1] - pos[i]
+        forces[i] += k * diff
+        forces[i+1] -= k * diff
+        FLOPS.add(20)  # heuristic per spring
     return forces
 
+def baseline_force_step(pos: np.ndarray, lr: float = 0.1, k: float = 1.0) -> np.ndarray:
+    return pos + lr * compute_forces(pos, k=k)
 
-# -------------------------------------------------
-# SOLVER CLASSES
-# -------------------------------------------------
+def tension_force_step(pos: np.ndarray, tension: float = 0.1, lr: float = 0.1, k: float = 1.0) -> np.ndarray:
+    center = pos.mean(axis=0)
+    coupling = tension * (center - pos)
+    FLOPS.add(pos.size * 2)
+    return pos + lr * compute_forces(pos, k=k) + coupling
 
-class ForceRelaxBaseline:
-    def __init__(self, lr=0.1, k=1.0):
-        self.lr = lr
-        self.k = k
+def total_chain_energy(pos: np.ndarray) -> float:
+    diffs = pos[1:] - pos[:-1]
+    # one square and one add per component approximate
+    FLOPS.add(int(diffs.size * 2))
+    return float(np.sum(diffs * diffs))
 
-    def step(self, pos):
-        forces = compute_forces(pos, k=self.k)
-        # pos + lr * forces
-        FLOPS.add(pos.size)  # multiply
-        FLOPS.add(pos.size)  # add
-        return pos + self.lr * forces
-
-
-class ForceRelaxTension:
-    def __init__(self, lr=0.1, tension=0.1, k=1.0):
-        self.lr = lr
-        self.k = k
-        self.tension = tension
-
-    def step(self, pos):
-        forces = compute_forces(pos, k=self.k)
-
-        # coupling = tension * (center - pos)
-        center = np.mean(pos, axis=0)
-        # mean: n adds and 1 divide, per dimension
-        n, d = pos.shape
-        FLOPS.add((n * d))     # adds
-        FLOPS.add(d)           # divides
-
-        diff = center - pos
-        FLOPS.add(pos.size)    # subtracts
-
-        coupling = self.tension * diff
-        FLOPS.add(pos.size)    # multiplies
-
-        # total update pos + lr*forces + coupling
-        FLOPS.add(pos.size)    # lr*forces multiply
-        FLOPS.add(pos.size)    # pos + lr*forces
-        FLOPS.add(pos.size)    # add coupling
-
-        return pos + self.lr * forces + coupling
-
-
-# -------------------------------------------------
-# MAIN SIMULATION API
-# -------------------------------------------------
-
-def run_force_relax(n=16, steps=200, tension=0.1, seed=None, k=1.0):
-    """
-    Returns dict:
-        - baseline_energy
-        - baseline_flops
-        - tension_energy
-        - tension_flops
-        - flop_savings
-    """
-
+def run_force_relax(n: int = 16, steps: int = 200, tension: float = 0.1, tol: float = 0.0, patience: int = 5, seed: int = None):
     if seed is not None:
         np.random.seed(seed)
-
     pos0 = np.random.randn(n, 2)
 
-    # --------------------------
-    # BASELINE
-    # --------------------------
-    baseline = ForceRelaxBaseline(lr=0.1, k=k)
+    # baseline
     pos = pos0.copy()
     FLOPS.reset()
-
+    best_energy = float("inf")
+    stagnant = 0
+    iters = 0
     for _ in range(steps):
-        pos = baseline.step(pos)
-
-    baseline_energy = pairwise_energy(pos)
+        pos = baseline_force_step(pos)
+        iters += 1
+        energy = total_chain_energy(pos)
+        if energy < best_energy - tol:
+            best_energy = energy
+            stagnant = 0
+        else:
+            stagnant += 1
+        if tol is not None and stagnant >= max(1, patience):
+            break
     baseline_flops = FLOPS.snapshot()
+    baseline_energy = float(total_chain_energy(pos))
+    baseline_conv = (stagnant >= max(1, patience))
 
-    # --------------------------
-    # TENSION
-    # --------------------------
-    tension_solver = ForceRelaxTension(lr=0.1, tension=tension, k=k)
+    # tension
     pos = pos0.copy()
     FLOPS.reset()
-
+    best_energy = float("inf")
+    stagnant = 0
+    t_iters = 0
     for _ in range(steps):
-        pos = tension_solver.step(pos)
-
-    tension_energy = pairwise_energy(pos)
+        pos = tension_force_step(pos, tension=tension)
+        t_iters += 1
+        energy = total_chain_energy(pos)
+        if energy < best_energy - tol:
+            best_energy = energy
+            stagnant = 0
+        else:
+            stagnant += 1
+        if tol is not None and stagnant >= max(1, patience):
+            break
     tension_flops = FLOPS.snapshot()
+    tension_energy = float(total_chain_energy(pos))
+    tension_conv = (stagnant >= max(1, patience))
 
     return {
-        "particles": n,
-        "steps": steps,
-        "baseline_energy": baseline_energy,
-        "baseline_flops": baseline_flops,
-        "tension_energy": tension_energy,
-        "tension_flops": tension_flops,
-        "flop_savings": baseline_flops - tension_flops,
+        "problem": "force_relax",
+        "params": {"particles": n, "steps": steps, "tension": tension, "tol": tol, "patience": patience, "seed": seed},
+        "baseline": {"energy": baseline_energy, "flops": int(baseline_flops), "iters": iters, "converged": baseline_conv},
+        "tension": {"energy": tension_energy, "flops": int(tension_flops), "iters": t_iters, "converged": tension_conv},
+        "flop_savings": int(baseline_flops - tension_flops),
     }
