@@ -1,30 +1,54 @@
+# baseline_solver.py
 """
-baseline_solver.py
-Simple orchestrator to run baseline solvers for comparison.
+Baseline random-local-search runner with convergence and FLOP reporting.
 """
+import numpy as np
+from typing import Callable, Tuple
+from flop_counter import GLOBAL_FLOPS as FLOPS
 
-from lumin0_core import Lumin0Core
-from lumin0_force_relax import run_force_relax
-from lumin0_matrix_relax import run_matrix_relax
-from lumin0_tsp import run_tsp
-from lumin0_real import Lumin0Real
+def baseline_step(pop: np.ndarray, func: Callable[[np.ndarray], float], step_size: float = 0.1) -> np.ndarray:
+    new_pop = pop.copy()
+    n, d = pop.shape
+    for i in range(n):
+        FLOPS.add(d * 3)
+        delta = np.random.normal(0.0, step_size, size=(d,))
+        cur_val = func(pop[i])
+        candidate = pop[i] + delta
+        cand_val = func(candidate)
+        FLOPS.add(5)
+        if cand_val < cur_val:
+            new_pop[i] = candidate
+    return new_pop
 
-
-def run_baseline_all():
-    """
-    Returns a dict with all baseline-only results for:
-      - particle relaxation
-      - matrix relaxation
-      - TSP 2-opt
-      - real-model mock solver
-    """
-
-    core = Lumin0Core()
-
-    return {
-        "force_relax": run_force_relax(n=16, steps=200, tension=0.0),
-        "matrix_relax": run_matrix_relax(n=64, steps=200, tension=0.0),
-        "tsp": run_tsp(cities=32, steps=500, tension=0.0),
-        "real": Lumin0Real(dim=64, tension=0.0).run(steps=200, use_tension=False),
-        "core_meta": core.describe(),
-    }
+def baseline_run(func: Callable[[np.ndarray], float],
+                 dim: int = 8,
+                 pop_size: int = 32,
+                 steps: int = 100,
+                 step_size: float = 0.1,
+                 tol: float = 0.0,
+                 patience: int = 5,
+                 seed: int = None):
+    if seed is not None:
+        np.random.seed(seed)
+    FLOPS.reset()
+    pop = np.random.uniform(-5.0, 5.0, size=(pop_size, dim))
+    history = []
+    best = float("inf")
+    stagnant = 0
+    iters = 0
+    for _ in range(steps):
+        pop = baseline_step(pop, func, step_size=step_size)
+        iters += 1
+        mean_val = float(func(pop.mean(axis=0)))
+        history.append(mean_val)
+        if mean_val < best - tol:
+            best = mean_val
+            stagnant = 0
+        else:
+            stagnant += 1
+        if tol is not None and stagnant >= max(1, patience):
+            break
+    total_flops = FLOPS.snapshot()
+    best_final = float(min(func(ind) for ind in pop))
+    converged = (stagnant >= max(1, patience))
+    return pop, history, best_final, int(total_flops), iters, converged
